@@ -1,0 +1,25 @@
+{
+  "id": "feishu",
+  "name": "Feishu Channel",
+  "version": "0.1.0",
+  "type": "channel",
+  "runtime": "node",
+  "entry": "dist/main.js",
+  "build": "npm install && npm run build",
+  "minHostVersion": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "app_id": { "type": "string", "description": "Feishu App ID" },
+      "app_secret": { "type": "string", "description": "Feishu App Secret" }
+    },
+    "required": ["app_id", "app_secret"]
+  },
+  "capabilities": {
+    "streaming": true,
+    "interactiveCards": true,
+    "reactions": true,
+    "editMessage": true,
+    "media": true
+  }
+}
