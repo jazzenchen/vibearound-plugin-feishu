@@ -71,6 +71,8 @@ export class StdioTransport {
 
   log(level: string, msg: string): void {
     process.stderr.write(`[feishu-plugin][${level}] ${msg}\n`);
+    // Also send via JSON-RPC so the host can handle structured logs
+    this.notify("plugin_log", { level, message: msg });
   }
 
   // --------------------------------------------------------------------------

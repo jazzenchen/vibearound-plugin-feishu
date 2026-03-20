@@ -12,19 +12,47 @@
  */
 
 import * as Lark from "@larksuiteoapi/node-sdk";
+import { inspect } from "node:util";
 import type { FeishuConfig } from "./protocol.js";
+import { plugLog } from "./stdout-guard.js";
+
+// Note: console.log/info/error are already redirected by stdout-guard.ts
+// (imported first in main.ts) with proper object serialization.
 
 // ---------------------------------------------------------------------------
-// Redirect Lark SDK console.log to stderr so it doesn't pollute stdio JSON-RPC
+// Custom logger for Lark SDK — serializes objects properly
 // ---------------------------------------------------------------------------
 
-const origConsoleLog = console.log;
-const origConsoleInfo = console.info;
-console.log = (...args: unknown[]) => {
-  process.stderr.write(`[lark-sdk] ${args.map(String).join(" ")}\n`);
-};
-console.info = (...args: unknown[]) => {
-  process.stderr.write(`[lark-sdk] ${args.map(String).join(" ")}\n`);
+function serializeArgs(...args: unknown[]): string {
+  return args.map((v) => {
+    if (typeof v === "string") return v;
+    if (v && typeof v === "object" && "isAxiosError" in v) {
+      const err = v as any;
+      const parts = [`AxiosError: ${err.message ?? "unknown"}`];
+      if (err.response) {
+        parts.push(`status=${err.response.status}`);
+        const data = err.response.data;
+        if (data) {
+          try {
+            parts.push(`body=${typeof data === "string" ? data : JSON.stringify(data)}`);
+          } catch {
+            parts.push(`body=${inspect(data, { depth: 2, colors: false })}`);
+          }
+        }
+      }
+      if (err.config?.url) parts.push(`url=${err.config.url}`);
+      return parts.join(" | ");
+    }
+    try { return JSON.stringify(v); } catch { return inspect(v, { depth: 3, colors: false }); }
+  }).join(" ");
+}
+
+const sdkLogger = {
+  error: (...msg: any[]) => plugLog("error", `[lark-sdk] ${serializeArgs(...msg)}`),
+  warn: (...msg: any[]) => plugLog("warn", `[lark-sdk] ${serializeArgs(...msg)}`),
+  info: (...msg: any[]) => plugLog("info", `[lark-sdk] ${serializeArgs(...msg)}`),
+  debug: (...msg: any[]) => plugLog("debug", `[lark-sdk] ${serializeArgs(...msg)}`),
+  trace: (...msg: any[]) => { /* suppress trace-level noise */ },
 };
 
 // ---------------------------------------------------------------------------
@@ -61,6 +89,7 @@ export class FeishuClient {
       appSecret: config.app_secret,
       appType: Lark.AppType.SelfBuild,
       domain: resolveDomain(config.domain),
+      logger: sdkLogger,
     });
   }
 
@@ -111,6 +140,7 @@ export class FeishuClient {
       appSecret: this.config.app_secret,
       domain: resolveDomain(this.config.domain),
       loggerLevel: Lark.LoggerLevel.info,
+      logger: sdkLogger,
     });
 
     // Patch: SDK handleEventData only handles type="event", card actions

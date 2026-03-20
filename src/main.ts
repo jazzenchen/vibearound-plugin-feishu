@@ -9,40 +9,41 @@
  *   Host spawns → "initialize" with config
  *   → Plugin probes bot identity + starts WebSocket gateway
  *   → Inbound events → on_message / on_reaction / on_callback notifications
- *   → Host sends outbound requests (send_text, edit_message, etc.)
+ *   → Host sends agent event notifications (agent_start, agent_token, agent_end, etc.)
  *   → Host sends "shutdown" → Plugin exits
  */
+
+// MUST be first import — intercepts stdout before Lark SDK loads
+import "./stdout-guard.js";
+import { setLogSink } from "./stdout-guard.js";
 
 import { StdioTransport } from "./stdio.js";
 import { FeishuClient } from "./lark-client.js";
 import { FeishuGateway } from "./gateway.js";
+import { AgentStreamHandler } from "./agent-stream.js";
 import type {
   FeishuConfig,
   InitializeParams,
   InitializeResult,
-  SendTextParams,
-  EditMessageParams,
-  SendInteractiveParams,
-  UpdateInteractiveParams,
-  ReactionParams,
 } from "./protocol.js";
 
 // ---------------------------------------------------------------------------
-// State
+// Globals
 // ---------------------------------------------------------------------------
 
 const transport = new StdioTransport();
+
+// Wire console.error/warn from stdout-guard.ts into JSON-RPC plugin_log
+setLogSink((level, message) => {
+  transport.notify("plugin_log", { level, message });
+});
+
 let client: FeishuClient | null = null;
 let gateway: FeishuGateway | null = null;
+let streamHandler: AgentStreamHandler | null = null;
 
-function requireClient(): FeishuClient {
-  if (!client) throw new Error("Plugin not initialized");
-  return client;
-}
-
-/** Strip "feishu:" prefix from channel ID to get raw chat_id. */
-function parseChatId(channelId: string): string {
-  return channelId.replace(/^feishu:/, "");
+function log(level: string, msg: string): void {
+  process.stderr.write(`[feishu-plugin][${level}] ${msg}\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -51,26 +52,23 @@ function parseChatId(channelId: string): string {
 
 transport.onRequest("initialize", async (params) => {
   const { config, hostVersion } = params as unknown as InitializeParams;
-  transport.log("info", `initialize: hostVersion=${hostVersion}`);
-
-  // Validate config
   const cfg = config as FeishuConfig;
-  if (!cfg.app_id || !cfg.app_secret) {
-    throw new Error("Missing required config: app_id and app_secret");
-  }
 
-  // Create SDK client
+  log("info", `initialize hostVersion=${hostVersion} appId=${cfg.app_id}`);
+
+  // Create Feishu client
   client = new FeishuClient(cfg);
+  await client.probe();
 
-  // Start gateway in background (includes probe + WebSocket)
+  // Create AgentStreamHandler
+  streamHandler = new AgentStreamHandler(client, log);
+
+  // Start WebSocket gateway
   gateway = new FeishuGateway(client, transport);
-  gateway.start().catch((err) => {
-    transport.log("error", `gateway failed: ${err}`);
-  });
+  gateway.start();
 
-  // Return immediately — bot identity will be available after probe completes
   const result: InitializeResult = {
-    protocolVersion: "0.1.0",
+    protocolVersion: "0.2.0",
     capabilities: {
       streaming: true,
       interactiveCards: true,
@@ -83,72 +81,43 @@ transport.onRequest("initialize", async (params) => {
 });
 
 // ---------------------------------------------------------------------------
-// Host → Plugin: send_text
+// Host → Plugin: agent event notifications (from MessageHub)
 // ---------------------------------------------------------------------------
 
-transport.onRequest("send_text", async (params) => {
-  const { channelId, text, replyTo } = params as unknown as SendTextParams;
-  const c = requireClient();
-  const chatId = parseChatId(channelId);
-
-  let messageId: string | undefined;
-  if (replyTo) {
-    messageId = await c.reply(replyTo, text);
-  } else {
-    messageId = await c.sendText(chatId, text);
-  }
-
-  return { messageId: messageId ?? null };
+transport.onNotification("agent_start", (params) => {
+  streamHandler?.onAgentStart(params);
 });
 
-// ---------------------------------------------------------------------------
-// Host → Plugin: edit_message
-// ---------------------------------------------------------------------------
-
-transport.onRequest("edit_message", async (params) => {
-  const { messageId, text } = params as unknown as EditMessageParams;
-  await requireClient().editMessage(messageId, text);
-  return {};
+transport.onNotification("agent_thinking", (params) => {
+  streamHandler?.onAgentThinking(params);
 });
 
-// ---------------------------------------------------------------------------
-// Host → Plugin: send_interactive
-// ---------------------------------------------------------------------------
-
-transport.onRequest("send_interactive", async (params) => {
-  const { channelId, card, replyTo } = params as unknown as SendInteractiveParams;
-  const chatId = parseChatId(channelId);
-  const messageId = await requireClient().sendInteractive(chatId, card, replyTo);
-  return { messageId: messageId ?? null };
+transport.onNotification("agent_token", (params) => {
+  streamHandler?.onAgentToken(params);
 });
 
-// ---------------------------------------------------------------------------
-// Host → Plugin: update_interactive
-// ---------------------------------------------------------------------------
-
-transport.onRequest("update_interactive", async (params) => {
-  const { messageId, card } = params as unknown as UpdateInteractiveParams;
-  await requireClient().updateInteractive(messageId, card);
-  return {};
+transport.onNotification("agent_text", (params) => {
+  streamHandler?.onAgentText(params);
 });
 
-// ---------------------------------------------------------------------------
-// Host → Plugin: add_reaction / remove_reaction
-// ---------------------------------------------------------------------------
-
-transport.onRequest("add_reaction", async (params) => {
-  const { messageId, emoji } = params as unknown as ReactionParams;
-  const reactionId = await requireClient().addReaction(messageId, emoji);
-  return { reactionId: reactionId ?? null };
+transport.onNotification("agent_tool_use", (params) => {
+  streamHandler?.onAgentToolUse(params);
 });
 
-transport.onRequest("remove_reaction", async (params) => {
-  const { messageId, emoji } = params as unknown as ReactionParams;
-  // Note: our protocol sends emoji, but Feishu API needs reaction_id.
-  // The host should track reaction_id from add_reaction response.
-  // For now, treat emoji as reaction_id (host-side mapping needed).
-  await requireClient().removeReaction(messageId, emoji);
-  return {};
+transport.onNotification("agent_tool_result", (params) => {
+  streamHandler?.onAgentToolResult(params);
+});
+
+transport.onNotification("agent_end", (params) => {
+  streamHandler?.onAgentEnd(params);
+});
+
+transport.onNotification("agent_error", (params) => {
+  streamHandler?.onAgentError(params);
+});
+
+transport.onNotification("send_text", (params) => {
+  streamHandler?.onSendText(params);
 });
 
 // ---------------------------------------------------------------------------
@@ -156,31 +125,16 @@ transport.onRequest("remove_reaction", async (params) => {
 // ---------------------------------------------------------------------------
 
 transport.onRequest("shutdown", async () => {
-  transport.log("info", "shutdown requested");
+  log("info", "shutdown requested");
   gateway?.stop();
   client?.disconnect();
-  setTimeout(() => process.exit(0), 300);
-  return {};
+  setTimeout(() => process.exit(0), 200);
+  return { ok: true };
 });
 
 // ---------------------------------------------------------------------------
-// Start
+// Start listening
 // ---------------------------------------------------------------------------
 
-transport.log("info", "VibeAround Feishu plugin starting...");
 transport.start();
-
-process.on("SIGTERM", () => {
-  gateway?.stop();
-  client?.disconnect();
-  process.exit(0);
-});
-
-process.on("SIGINT", () => {
-  gateway?.stop();
-  client?.disconnect();
-  process.exit(0);
-});
-
-// Keep alive
-process.stdin.resume();
+log("info", "plugin started, waiting for initialize...");
