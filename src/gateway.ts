@@ -125,7 +125,7 @@ export class FeishuGateway {
 
     // Notify stream handler that a prompt is being sent (for lifecycle tracking)
     const channelId = `feishu:${chatId}`;
-    this.streamHandler?.onPromptSent(channelId, messageId);
+    await this.streamHandler?.onPromptSent(channelId, messageId);
 
     // Send as ACP prompt — chatId as sessionId.
     // prompt() blocks until the turn completes and returns the real StopReason.

@@ -51,6 +51,8 @@ interface ChannelState {
   flushTimer: ReturnType<typeof setTimeout> | null;
   /** Timestamp of last edit (for throttling). */
   lastEditMs: number;
+  /** Serializes send/edit calls to guarantee message order. */
+  sendChain: Promise<void>;
 }
 
 type LogFn = (level: string, msg: string) => void;
@@ -96,8 +98,9 @@ export class AgentStreamHandler {
 
   // ---- Prompt lifecycle (called by gateway) ----
 
-  /** Called when a prompt is sent — set up state and add processing emoji. */
-  onPromptSent(channelId: string, userMessageId?: string): void {
+  /** Called when a prompt is sent — set up state and add processing emoji.
+   *  Returns after the reaction is added (must await before prompt). */
+  async onPromptSent(channelId: string, userMessageId?: string): Promise<void> {
     this.lastActiveChannelId = channelId;
 
     // Clean up any previous state
@@ -111,17 +114,19 @@ export class AgentStreamHandler {
       reactionId: null,
       flushTimer: null,
       lastEditMs: 0,
+      sendChain: Promise.resolve(),
     };
     this.channels.set(channelId, state);
 
-    // Add OnIt processing reaction
+    // Add OnIt processing reaction — await so it's set before prompt returns
     if (userMessageId) {
-      this.client.addReaction(userMessageId, PROCESSING_EMOJI)
-        .then((rid) => {
-          this.log("debug", `addReaction result: rid=${rid} channelId=${channelId}`);
-          if (rid) state.reactionId = rid;
-        })
-        .catch((e) => this.log("error", `addReaction failed: ${e}`));
+      try {
+        const rid = await this.client.addReaction(userMessageId, PROCESSING_EMOJI);
+        this.log("debug", `addReaction result: rid=${rid} channelId=${channelId}`);
+        if (rid) state.reactionId = rid;
+      } catch (e) {
+        this.log("error", `addReaction failed: ${e}`);
+      }
     }
   }
 
@@ -256,7 +261,7 @@ export class AgentStreamHandler {
       // Different kind — seal current, start new
       if (current && !current.sealed) {
         current.sealed = true;
-        this.flushBlock(channelId, state, current);
+        this.enqueueFlush(channelId, state, current);
       }
       state.blocks.push({ kind, content: delta, messageId: null, sealed: false });
     }
@@ -274,7 +279,8 @@ export class AgentStreamHandler {
         reactionId: null,
         flushTimer: null,
         lastEditMs: 0,
-        };
+        sendChain: Promise.resolve(),
+      };
       this.channels.set(channelId, state);
     }
     return state;
@@ -309,7 +315,14 @@ export class AgentStreamHandler {
       return;
     }
 
-    this.flushBlock(channelId, state, block);
+    this.enqueueFlush(channelId, state, block);
+  }
+
+  /** Chain flushBlock onto the send queue to guarantee message order. */
+  private enqueueFlush(channelId: string, state: ChannelState, block: MessageBlock): void {
+    state.sendChain = state.sendChain
+      .then(() => this.flushBlock(channelId, state, block))
+      .catch((e) => this.log("error", `enqueueFlush error: ${e}`));
   }
 
   /** Send or update a single block's Feishu card. */
@@ -355,7 +368,7 @@ export class AgentStreamHandler {
     if (!block || block.sealed) return;
 
     block.sealed = true;
-    this.flushBlock(channelId, state, block);
+    this.enqueueFlush(channelId, state, block);
   }
 
   /** Format block content with appropriate prefix based on kind. */
