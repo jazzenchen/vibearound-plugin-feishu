@@ -11,6 +11,7 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^0.17.1",
     "@larksuiteoapi/node-sdk": "^1.59.0"
   },
   "devDependencies": {

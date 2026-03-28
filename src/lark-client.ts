@@ -14,10 +14,11 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { inspect } from "node:util";
 import type { FeishuConfig } from "./protocol.js";
-import { plugLog } from "./stdout-guard.js";
+function plugLog(level: string, message: string): void {
+  process.stderr.write(`[feishu-lark][${level}] ${message}\n`);
+}
 
-// Note: console.log/info/error are already redirected by stdout-guard.ts
-// (imported first in main.ts) with proper object serialization.
+// Note: console.* are redirected to stderr in main.ts.
 
 // ---------------------------------------------------------------------------
 // Custom logger for Lark SDK — serializes objects properly

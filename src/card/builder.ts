@@ -40,16 +40,10 @@ export function buildMarkdownCard(text: string): Record<string, unknown> {
 /** Build a streaming card (v2 schema with element_id for updates). */
 export function buildStreamingCard(text: string, status: "thinking" | "streaming" | "complete" = "streaming"): Record<string, unknown> {
   const optimized = optimizeMarkdownStyle(text);
-  const statusEmoji = status === "thinking" ? "🤔" : status === "streaming" ? "✍️" : "✅";
-  const statusText = status === "thinking" ? "Thinking..." : status === "streaming" ? "Generating..." : "Complete";
 
   return {
     schema: "2.0",
     config: { wide_screen_mode: true, update_multi: true },
-    header: {
-      title: { tag: "plain_text", content: `${statusEmoji} ${statusText}` },
-      template: status === "complete" ? "green" : "blue",
-    },
     body: {
       elements: [
         {

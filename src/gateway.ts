@@ -6,9 +6,9 @@
  * them to the Host as JSON-RPC notifications.
  */
 
+import type { Agent } from "@agentclientprotocol/sdk";
 import type { FeishuClient } from "./lark-client.js";
-import type { StdioTransport } from "./stdio.js";
-import type { OnMessageParams, OnReactionParams, OnCallbackParams } from "./protocol.js";
+import type { AgentStreamHandler } from "./agent-stream.js";
 import type { FeishuMessageEvent, FeishuReactionCreatedEvent, MentionInfo } from "./messaging/types.js";
 import type { ConvertContext } from "./messaging/converters/types.js";
 import { convertMessageContent } from "./messaging/converters/content-converter.js";
@@ -21,24 +21,29 @@ import { mentionedBot } from "./messaging/inbound/mention.js";
 
 export class FeishuGateway {
   private client: FeishuClient;
-  private transport: StdioTransport;
+  private agent: Agent;
+  private streamHandler: AgentStreamHandler | null = null;
   private dedup = new MessageDedup();
   private abortController = new AbortController();
 
-  constructor(client: FeishuClient, transport: StdioTransport) {
+  constructor(client: FeishuClient, agent: Agent) {
     this.client = client;
-    this.transport = transport;
+    this.agent = agent;
+  }
+
+  setStreamHandler(handler: AgentStreamHandler): void {
+    this.streamHandler = handler;
   }
 
   async start(): Promise<void> {
-    this.transport.log("info", "starting WebSocket gateway...");
+    this.log("info", "starting WebSocket gateway...");
 
     const probe = await this.client.probe();
     if (!probe.ok) {
-      this.transport.log("error", `bot probe failed: ${probe.error}`);
+      this.log("error", `bot probe failed: ${probe.error}`);
       throw new Error(`Bot probe failed: ${probe.error}`);
     }
-    this.transport.log("info", `bot identity: ${this.client.botName} (${this.client.botOpenId})`);
+    this.log("info", `bot identity: ${this.client.botName} (${this.client.botOpenId})`);
 
     await this.client.startWS(
       {
@@ -46,10 +51,10 @@ export class FeishuGateway {
         "im.message.message_read_v1": async () => {},
         "im.message.reaction.created_v1": (data) => this.handleReaction(data),
         "im.chat.member.bot.added_v1": async (data) => {
-          this.transport.log("info", `bot added to chat: ${JSON.stringify(data)}`);
+          this.log("info", `bot added to chat: ${JSON.stringify(data)}`);
         },
         "im.chat.member.bot.deleted_v1": async (data) => {
-          this.transport.log("info", `bot removed from chat: ${JSON.stringify(data)}`);
+          this.log("info", `bot removed from chat: ${JSON.stringify(data)}`);
         },
         "card.action.trigger": (data) => this.handleCardAction(data),
       },
@@ -59,6 +64,10 @@ export class FeishuGateway {
 
   stop(): void {
     this.abortController.abort();
+  }
+
+  private log(level: string, msg: string): void {
+    process.stderr.write(`[feishu-gateway][${level}] ${msg}\n`);
   }
 
   // --------------------------------------------------------------------------
@@ -114,28 +123,24 @@ export class FeishuGateway {
     // Convert message content using the full converter system
     const result = await convertMessageContent(msg.message_type, msg.content, ctx);
 
-    const params: OnMessageParams = {
-      channelId: `feishu:${chatId}`,
-      messageId,
-      chatType: msg.chat_type,
-      sender: {
-        id: senderOpenId,
-        name: undefined, // resolved by host if needed
-        type: event.sender?.sender_type === "bot" ? "bot" : "user",
-      },
-      text: result.content,
-      mentions: mentionsList.filter((m) => !m.isBot).map((m) => ({
-        id: m.openId,
-        name: m.name,
-      })),
-      mentionedBot: mentionsList.some((m) => m.isBot),
-      resources: result.resources.length > 0 ? result.resources : undefined,
-      replyTo: msg.parent_id || undefined,
-      threadId: msg.thread_id || undefined,
-      rootId: msg.root_id || undefined,
-    };
+    // Notify stream handler that a prompt is being sent (for lifecycle tracking)
+    const channelId = `feishu:${chatId}`;
+    this.streamHandler?.onPromptSent(channelId, messageId);
 
-    this.transport.notify("on_message", params as unknown as Record<string, unknown>);
+    // Send as ACP prompt — chatId as sessionId.
+    // prompt() blocks until the turn completes and returns the real StopReason.
+    // Session notifications stream in during the call.
+    try {
+      const response = await this.agent.prompt({
+        sessionId: chatId,
+        prompt: [{ type: "text", text: result.content }],
+      });
+      this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
+      this.streamHandler?.onTurnEnd(channelId);
+    } catch (error: unknown) {
+      this.log("error", `prompt failed chat=${chatId}: ${error}`);
+      this.streamHandler?.onTurnError(channelId, String(error));
+    }
   }
 
   private async handleReaction(data: unknown): Promise<void> {
@@ -148,14 +153,14 @@ export class FeishuGateway {
     if (!this.dedup.check(dedupKey)) return;
     if (senderOpenId === this.client.botOpenId) return;
 
-    const params: OnReactionParams = {
-      channelId: event.chat_id ? `feishu:${event.chat_id}` : "",
-      messageId,
-      sender: { id: senderOpenId },
-      emoji,
-    };
-
-    this.transport.notify("on_reaction", params as unknown as Record<string, unknown>);
+    this.agent
+      .extNotification?.("channel/reaction", {
+        channelId: event.chat_id ? `feishu:${event.chat_id}` : "",
+        messageId,
+        sender: { id: senderOpenId },
+        emoji,
+      })
+      .catch(() => {});
   }
 
   private async handleCardAction(data: unknown): Promise<unknown> {
@@ -167,15 +172,15 @@ export class FeishuGateway {
     };
 
     const chatId = event.open_chat_id ?? "";
-    const params: OnCallbackParams = {
-      channelId: `feishu:${chatId}`,
-      callbackId: `card_${Date.now()}`,
-      sender: { id: event.operator?.open_id ?? "" },
-      data: event.action?.value ?? {},
-      messageId: event.open_message_id,
-    };
-
-    this.transport.notify("on_callback", params as unknown as Record<string, unknown>);
+    this.agent
+      .extNotification?.("channel/callback", {
+        channelId: `feishu:${chatId}`,
+        callbackId: `card_${Date.now()}`,
+        sender: { id: event.operator?.open_id ?? "" },
+        data: event.action?.value ?? {},
+        messageId: event.open_message_id,
+      })
+      .catch(() => {});
     return {};
   }
 }
