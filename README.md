@@ -15,6 +15,9 @@ The plugin runs as a child process of the host. Messages are exchanged over stdi
 ## Features
 
 - 22 Feishu message type parsers (text, post, image, file, audio, video, sticker, card, merge forward, etc.)
+- **Block-based card rendering**: each contiguous run of the same variant (thinking, tool use, text) becomes a separate interactive card. When the variant changes, the current card is sealed and a new one starts.
+- **sendChain message ordering**: all `flushBlock` calls are serialized via a promise chain to prevent out-of-order card delivery
+- **Emoji await before prompt**: `addReaction()` is awaited before calling `prompt()`, ensuring the indicator is visible before the agent turn can complete
 - Send, edit, reply, and quote messages
 - Emoji reactions
 - Interactive cards (Markdown cards, streaming cards, button actions)
@@ -22,6 +25,7 @@ The plugin runs as a child process of the host. Messages are exchanged over stdi
 - @mention parsing (auto-strips bot self-mentions)
 - Message deduplication (12h TTL, prevents WebSocket reconnect replay)
 - Group chat support (responds only when bot is @mentioned)
+- `/help` slash command returns cached agent commands + system commands
 
 ## Project Structure
 
