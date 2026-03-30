@@ -6,7 +6,9 @@
  * them to the Host as JSON-RPC notifications.
  */
 
-import type { Agent } from "@agentclientprotocol/sdk";
+import path from "node:path";
+
+import type { Agent, ContentBlock } from "@agentclientprotocol/sdk";
 import type { FeishuClient } from "./lark-client.js";
 import type { AgentStreamHandler } from "./agent-stream.js";
 import type { FeishuMessageEvent, FeishuReactionCreatedEvent, MentionInfo } from "./messaging/types.js";
@@ -14,6 +16,8 @@ import type { ConvertContext } from "./messaging/converters/types.js";
 import { convertMessageContent } from "./messaging/converters/content-converter.js";
 import { MessageDedup } from "./messaging/inbound/dedup.js";
 import { mentionedBot } from "./messaging/inbound/mention.js";
+import { downloadMessageResource } from "./messaging/media-download.js";
+import type { DownloadedResource } from "./messaging/media-download.js";
 
 // ---------------------------------------------------------------------------
 // Gateway
@@ -22,13 +26,15 @@ import { mentionedBot } from "./messaging/inbound/mention.js";
 export class FeishuGateway {
   private client: FeishuClient;
   private agent: Agent;
+  private cacheDir: string;
   private streamHandler: AgentStreamHandler | null = null;
   private dedup = new MessageDedup();
   private abortController = new AbortController();
 
-  constructor(client: FeishuClient, agent: Agent) {
+  constructor(client: FeishuClient, agent: Agent, cacheDir: string) {
     this.client = client;
     this.agent = agent;
+    this.cacheDir = cacheDir;
   }
 
   setStreamHandler(handler: AgentStreamHandler): void {
@@ -123,6 +129,40 @@ export class FeishuGateway {
     // Convert message content using the full converter system
     const result = await convertMessageContent(msg.message_type, msg.content, ctx);
 
+    // Download media resources (images, files, etc.)
+    const downloaded: DownloadedResource[] = [];
+    for (const resource of result.resources) {
+      const media = await downloadMessageResource({
+        client: this.client,
+        messageId,
+        resource,
+        cacheDir: this.cacheDir,
+        chatId,
+      });
+      if (media) downloaded.push(media);
+    }
+
+    // Build ACP prompt content blocks
+    const contentBlocks: ContentBlock[] = [];
+
+    if (result.content) {
+      contentBlocks.push({ type: "text", text: result.content });
+    } else if (downloaded.length > 0) {
+      const types = [...new Set(downloaded.map((m) => m.type))].join(", ");
+      contentBlocks.push({ type: "text", text: `The user sent ${types}.` });
+    }
+
+    for (const media of downloaded) {
+      contentBlocks.push({
+        type: "resource_link",
+        uri: `file://${media.path}`,
+        name: media.fileName ?? path.basename(media.path),
+        mimeType: media.mimeType,
+      });
+    }
+
+    if (contentBlocks.length === 0) return;
+
     // Notify stream handler that a prompt is being sent (for lifecycle tracking)
     const channelId = `feishu:${chatId}`;
     await this.streamHandler?.onPromptSent(channelId, messageId);
@@ -133,7 +173,7 @@ export class FeishuGateway {
     try {
       const response = await this.agent.prompt({
         sessionId: chatId,
-        prompt: [{ type: "text", text: result.content }],
+        prompt: contentBlocks,
       });
       this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
       this.streamHandler?.onTurnEnd(channelId);

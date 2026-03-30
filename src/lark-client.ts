@@ -275,4 +275,42 @@ export class FeishuClient {
       path: { message_id: messageId, reaction_id: reactionId },
     });
   }
+
+  // ---- Download message resource (image/file) ------------------------------
+
+  async downloadResource(
+    messageId: string,
+    fileKey: string,
+    type: "image" | "file",
+  ): Promise<Buffer> {
+    const res = await this.sdk.im.messageResource.get({
+      path: { message_id: messageId, file_key: fileKey },
+      params: { type },
+    });
+    const resAny = res as any;
+
+    // Lark SDK returns { writeFile, getReadableStream, headers }
+    // Use getReadableStream() to get the binary data
+    if (typeof resAny.getReadableStream === "function") {
+      const stream = resAny.getReadableStream();
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      return Buffer.concat(chunks);
+    }
+
+    // Fallback: try writeFile to a temp path and read back
+    if (typeof resAny.writeFile === "function") {
+      const os = await import("node:os");
+      const fs = await import("node:fs/promises");
+      const tmpPath = `${os.tmpdir()}/feishu-dl-${fileKey}-${Date.now()}`;
+      await resAny.writeFile(tmpPath);
+      const buf = await fs.readFile(tmpPath);
+      await fs.rm(tmpPath, { force: true });
+      return buf;
+    }
+
+    throw new Error(`downloadResource: unexpected response type for ${fileKey}, keys=${Object.keys(resAny ?? {}).join(",")}`);
+  }
 }
