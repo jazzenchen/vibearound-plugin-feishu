@@ -11,7 +11,7 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
-    "@vibearound/plugin-channel-sdk": "file:../channel-sdk",
+    "@vibearound/plugin-channel-sdk": "^0.1.1",
     "@larksuiteoapi/node-sdk": "^1.59.0"
   },
   "devDependencies": {
