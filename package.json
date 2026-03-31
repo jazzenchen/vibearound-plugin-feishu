@@ -1,6 +1,6 @@
 {
   "name": "@vibearound/plugin-feishu",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "VibeAround Feishu/Lark channel plugin (stdio JSON-RPC)",
@@ -11,7 +11,7 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
-    "@vibearound/plugin-channel-sdk": "^0.1.1",
+    "@vibearound/plugin-channel-sdk": "^0.1.2",
     "@larksuiteoapi/node-sdk": "^1.59.0"
   },
   "devDependencies": {
