@@ -178,8 +178,9 @@ export class FeishuGateway {
       this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
       this.streamHandler?.onTurnEnd(channelId);
     } catch (error: unknown) {
-      this.log("error", `prompt failed chat=${chatId}: ${error}`);
-      this.streamHandler?.onTurnError(channelId, String(error));
+      const msg = error instanceof Error ? error.message : String(error);
+      this.log("error", `prompt failed chat=${chatId}: ${msg}`);
+      this.streamHandler?.onTurnError(channelId, msg);
     }
   }
 

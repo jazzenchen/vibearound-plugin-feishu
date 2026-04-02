@@ -26,14 +26,22 @@ interface FeishuCard {
 // Card builders
 // ---------------------------------------------------------------------------
 
-/** Build a simple markdown card. */
+/** Build a simple markdown card (v2 schema). */
 export function buildMarkdownCard(text: string): Record<string, unknown> {
   const optimized = optimizeMarkdownStyle(text);
   return {
+    schema: "2.0",
     config: { wide_screen_mode: true },
-    elements: [
-      { tag: "div", text: { tag: "lark_md", content: optimized } },
-    ],
+    body: {
+      elements: [
+        {
+          tag: "markdown",
+          content: optimized,
+          text_align: "left",
+          element_id: STREAMING_ELEMENT_ID,
+        },
+      ],
+    },
   };
 }
 
@@ -57,27 +65,30 @@ export function buildStreamingCard(text: string, status: "thinking" | "streaming
   };
 }
 
-/** Build a card with action buttons (e.g., confirm/cancel). */
+/** Build a card with action buttons (v2 schema). */
 export function buildActionCard(
   text: string,
   actions: Array<{ text: string; value: Record<string, unknown>; type?: "primary" | "danger" | "default" }>,
 ): Record<string, unknown> {
   const optimized = optimizeMarkdownStyle(text);
   return {
+    schema: "2.0",
     config: { wide_screen_mode: true },
-    elements: [
-      { tag: "div", text: { tag: "lark_md", content: optimized } },
-      { tag: "hr" },
-      {
-        tag: "action",
-        actions: actions.map((a) => ({
-          tag: "button",
-          text: { tag: "plain_text", content: a.text },
-          type: a.type ?? "default",
-          value: a.value,
-        })),
-      },
-    ],
+    body: {
+      elements: [
+        { tag: "markdown", content: optimized, text_align: "left" },
+        { tag: "hr" },
+        {
+          tag: "action",
+          actions: actions.map((a) => ({
+            tag: "button",
+            text: { tag: "plain_text", content: a.text },
+            type: a.type ?? "default",
+            value: a.value,
+          })),
+        },
+      ],
+    },
   };
 }
 
