@@ -8,7 +8,7 @@
 
 import path from "node:path";
 
-import type { Agent, ContentBlock } from "@agentclientprotocol/sdk";
+import type { Agent, ContentBlock } from "@vibearound/plugin-channel-sdk";
 import type { FeishuClient } from "./lark-client.js";
 import type { AgentStreamHandler } from "./agent-stream.js";
 import type { FeishuMessageEvent, FeishuReactionCreatedEvent, MentionInfo } from "./messaging/types.js";
@@ -24,7 +24,8 @@ import type { DownloadedResource } from "./messaging/media-download.js";
 // ---------------------------------------------------------------------------
 
 export class FeishuGateway {
-  private client: FeishuClient;
+  /** Public for `createStreamHandler` — the stream handler needs the client to send messages. */
+  readonly client: FeishuClient;
   private agent: Agent;
   private cacheDir: string;
   private streamHandler: AgentStreamHandler | null = null;
