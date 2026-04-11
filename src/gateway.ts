@@ -38,25 +38,13 @@ export class FeishuGateway {
     this.cacheDir = cacheDir;
   }
 
-  getBotIdentity(): { id: string; name: string } {
-    return {
-      id: this.client.botOpenId ?? "unknown",
-      name: this.client.botName ?? "unknown",
-    };
-  }
-
   setStreamHandler(handler: AgentStreamHandler): void {
     this.streamHandler = handler;
   }
 
   async start(): Promise<void> {
     this.log("info", "starting WebSocket gateway...");
-
-    const probe = await this.client.probe();
-    if (!probe.ok) {
-      this.log("error", `bot probe failed: ${probe.error}`);
-      throw new Error(`Bot probe failed: ${probe.error}`);
-    }
+    // probe() already called in afterCreate — botOpenId/botName are set.
     this.log("info", `bot identity: ${this.client.botName} (${this.client.botOpenId})`);
 
     await this.client.startWS(
@@ -202,14 +190,8 @@ export class FeishuGateway {
     if (!this.dedup.check(dedupKey)) return;
     if (senderOpenId === this.client.botOpenId) return;
 
-    this.agent
-      .extNotification?.("channel/reaction", {
-        channelId: event.chat_id ? `feishu:${event.chat_id}` : "",
-        messageId,
-        sender: { id: senderOpenId },
-        emoji,
-      })
-      .catch(() => {});
+    // Reaction events are logged but not forwarded to host (no handler).
+    this.log("debug", `reaction: msg=${messageId} emoji=${emoji} sender=${senderOpenId}`);
   }
 
   private async handleCardAction(data: unknown): Promise<unknown> {
@@ -223,7 +205,7 @@ export class FeishuGateway {
     const chatId = event.open_chat_id ?? "";
     this.agent
       .extNotification?.("channel/callback", {
-        channelId: `feishu:${chatId}`,
+        chatId,
         callbackId: `card_${Date.now()}`,
         sender: { id: event.operator?.open_id ?? "" },
         data: event.action?.value ?? {},

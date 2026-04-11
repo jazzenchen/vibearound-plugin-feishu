@@ -30,6 +30,12 @@ runChannelPlugin({
     const client = new FeishuClient(feishuConfig);
     return new FeishuGateway(client, agent, cacheDir);
   },
+  afterCreate: async (gateway) => {
+    // probe() calls GET /open-apis/bot/v3/info to get botOpenId + botName.
+    // Must run before start() — start() blocks on WebSocket listen.
+    const result = await gateway.client.probe();
+    if (!result.ok) throw new Error(`Bot probe failed: ${result.error}`);
+  },
   createRenderer: (gateway, log, verbose) =>
     new AgentStreamHandler(gateway.client, log, verbose),
 });
