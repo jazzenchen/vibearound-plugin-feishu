@@ -38,6 +38,13 @@ export class FeishuGateway {
     this.cacheDir = cacheDir;
   }
 
+  getBotIdentity(): { id: string; name: string } {
+    return {
+      id: this.client.botOpenId ?? "unknown",
+      name: this.client.botName ?? "unknown",
+    };
+  }
+
   setStreamHandler(handler: AgentStreamHandler): void {
     this.streamHandler = handler;
   }
@@ -164,9 +171,9 @@ export class FeishuGateway {
 
     if (contentBlocks.length === 0) return;
 
-    // Notify stream handler that a prompt is being sent (for lifecycle tracking)
-    const channelId = `feishu:${chatId}`;
-    await this.streamHandler?.onPromptSent(channelId, messageId);
+    // Notify stream handler that a prompt is being sent (for lifecycle tracking).
+    // Uses raw chatId — no "feishu:" prefix. The host owns channelKind routing.
+    await this.streamHandler?.onPromptSent(chatId, messageId);
 
     // Send as ACP prompt — chatId as sessionId.
     // prompt() blocks until the turn completes and returns the real StopReason.
@@ -177,11 +184,11 @@ export class FeishuGateway {
         prompt: contentBlocks,
       });
       this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
-      this.streamHandler?.onTurnEnd(channelId);
+      this.streamHandler?.onTurnEnd(chatId);
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : String(error);
       this.log("error", `prompt failed chat=${chatId}: ${msg}`);
-      this.streamHandler?.onTurnError(channelId, msg);
+      this.streamHandler?.onTurnError(chatId, msg);
     }
   }
 

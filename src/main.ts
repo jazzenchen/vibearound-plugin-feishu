@@ -30,6 +30,6 @@ runChannelPlugin({
     const client = new FeishuClient(feishuConfig);
     return new FeishuGateway(client, agent, cacheDir);
   },
-  createStreamHandler: (gateway, log, verbose) =>
+  createRenderer: (gateway, log, verbose) =>
     new AgentStreamHandler(gateway.client, log, verbose),
 });

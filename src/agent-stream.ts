@@ -1,23 +1,18 @@
 /**
- * AgentStreamHandler — receives ACP session updates from the Host and renders
- * them as separate Feishu messages, one per contiguous variant block.
+ * Feishu stream renderer — extends BlockRenderer with Feishu-specific transport.
  *
- * Extends BlockRenderer from @vibearound/plugin-channel-sdk which handles:
- *   - Block accumulation and kind-change detection
- *   - Debounced flushing + edit throttling (600ms for Feishu's rate limit)
- *   - Serialized sendChain for guaranteed message order
- *   - Verbose filtering (thinking / tool blocks)
+ * Only implements:
+ *   - sendText / sendBlock / editBlock — Feishu API calls
+ *   - formatContent — Feishu markdown formatting
+ *   - onAfterTurnEnd / onAfterTurnError — "OnIt" reaction management
  *
- * This class adds Feishu-specific concerns:
- *   - "OnIt" processing reaction on prompt start, removed on turn end
- *   - Streaming card format while live, markdown card when sealed
- *   - Platform-specific error card on turn error
+ * Everything else (block accumulation, debouncing, notification routing,
+ * lastActiveChatId tracking) is handled by BlockRenderer in the SDK.
  */
 
 import {
   BlockRenderer,
   type BlockKind,
-  type SessionNotification,
   type VerboseConfig,
 } from "@vibearound/plugin-channel-sdk";
 import type { FeishuClient } from "./lark-client.js";
@@ -29,8 +24,8 @@ import { buildStreamingCard, buildMarkdownCard } from "./card/builder.js";
 
 type LogFn = (level: string, msg: string) => void;
 
-/** Feishu-specific per-channel state (reaction tracking). */
-interface FeishuChannelState {
+/** Per-chat state for "OnIt" reaction tracking. */
+interface ReactionState {
   userMessageId: string | null;
   reactionId: string | null;
 }
@@ -38,15 +33,13 @@ interface FeishuChannelState {
 const PROCESSING_EMOJI = "OnIt";
 
 // ---------------------------------------------------------------------------
-// AgentStreamHandler
+// FeishuStreamHandler
 // ---------------------------------------------------------------------------
 
 export class AgentStreamHandler extends BlockRenderer<string> {
   private feishuClient: FeishuClient;
   private log: LogFn;
-  /** Feishu-specific state: reaction IDs per channel. */
-  private feishuStates = new Map<string, FeishuChannelState>();
-  private lastActiveChannelId: string | null = null;
+  private reactionStates = new Map<string, ReactionState>();
 
   constructor(client: FeishuClient, log: LogFn, verbose?: Partial<VerboseConfig>) {
     super({
@@ -58,29 +51,19 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     this.log = log;
   }
 
-  // ---- BlockRenderer overrides ----
+  // ---- Required by BlockRenderer ----
 
-  /** Prefix sessionId with "feishu:" to form the channel ID. */
-  protected sessionIdToChannelId(sessionId: string): string {
-    return `feishu:${sessionId}`;
+  /** Send plain text message (for system text, agent ready, errors). */
+  protected async sendText(chatId: string, text: string): Promise<void> {
+    await this.feishuClient.sendText(chatId, text);
   }
 
-  /** Feishu markdown: italicise thinking, plain for tool/text. */
-  protected formatContent(kind: BlockKind, content: string, _sealed: boolean): string {
-    switch (kind) {
-      case "thinking": return `💭 *${content}*`;
-      case "tool":     return content;
-      case "text":     return content;
-    }
-  }
-
-  /** Send new block as a streaming card. */
-  protected async sendBlock(channelId: string, kind: BlockKind, content: string): Promise<string | null> {
-    const chatId = this.parseChatId(channelId);
+  /** Send new streaming block as an interactive card. */
+  protected async sendBlock(chatId: string, kind: BlockKind, content: string): Promise<string | null> {
     try {
       const card = buildStreamingCard(content, "streaming");
       const messageId = await this.feishuClient.sendInteractive(chatId, card);
-      this.log("debug", `flush: new card kind=${kind} messageId=${messageId}`);
+      this.log("debug", `sendBlock kind=${kind} messageId=${messageId}`);
       return messageId ?? null;
     } catch (e) {
       this.log("error", `sendBlock failed: ${e}`);
@@ -90,7 +73,7 @@ export class AgentStreamHandler extends BlockRenderer<string> {
 
   /** Edit existing block — streaming card while live, markdown card when sealed. */
   protected async editBlock(
-    channelId: string,
+    chatId: string,
     ref: string,
     _kind: BlockKind,
     content: string,
@@ -104,81 +87,55 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     }
   }
 
-  /** Remove processing reaction after all blocks are flushed. */
-  protected async onAfterTurnEnd(channelId: string): Promise<void> {
-    await this.removeReaction(channelId);
+  /** Feishu markdown formatting. */
+  protected formatContent(kind: BlockKind, content: string, _sealed: boolean): string {
+    switch (kind) {
+      case "thinking": return `💭 *${content}*`;
+      case "tool":     return content;
+      case "text":     return content;
+    }
   }
 
-  /** Send error card and remove processing reaction. */
-  protected async onAfterTurnError(channelId: string, error: string): Promise<void> {
-    const chatId = this.parseChatId(channelId);
-    const card = buildMarkdownCard(`❌ **Error**: ${error}`);
-    this.feishuClient.sendInteractive(chatId, card).catch(() => {});
-    await this.removeReaction(channelId);
-  }
+  // ---- Feishu-specific: "OnIt" reaction ----
 
-  // ---- Prompt lifecycle ----
+  /** Add "OnIt" reaction when prompt starts. */
+  async onPromptSent(chatId: string, userMessageId?: string): Promise<void> {
+    super.onPromptSent(chatId);
 
-  /**
-   * Called before sending a prompt.
-   * Resets renderer state (via super) and adds the "OnIt" processing reaction.
-   * Must be awaited so the reaction is visible before the agent starts responding.
-   */
-  async onPromptSent(channelId: string, userMessageId?: string): Promise<void> {
-    this.lastActiveChannelId = channelId;
-    super.onPromptSent(channelId); // reset block state
-
-    const feishuState: FeishuChannelState = { userMessageId: userMessageId ?? null, reactionId: null };
-    this.feishuStates.set(channelId, feishuState);
+    const state: ReactionState = { userMessageId: userMessageId ?? null, reactionId: null };
+    this.reactionStates.set(chatId, state);
 
     if (userMessageId) {
       try {
         const rid = await this.feishuClient.addReaction(userMessageId, PROCESSING_EMOJI);
-        this.log("debug", `addReaction result: rid=${rid} channelId=${channelId}`);
-        if (rid) feishuState.reactionId = rid;
+        if (rid) state.reactionId = rid;
       } catch (e) {
         this.log("error", `addReaction failed: ${e}`);
       }
     }
   }
 
-  // ---- Host ext notification handlers ----
-
-  onAgentReady(agent: string, version: string): void {
-    const channelId = this.lastActiveChannelId;
-    if (!channelId) return;
-    const chatId = this.parseChatId(channelId);
-    this.feishuClient.sendText(chatId, `🤖 Agent: ${agent} v${version}`).catch(() => {});
+  /** Remove reaction after turn completes. */
+  protected async onAfterTurnEnd(chatId: string): Promise<void> {
+    await this.removeReaction(chatId);
   }
 
-  onSessionReady(sessionId: string): void {
-    const channelId = this.lastActiveChannelId;
-    if (!channelId) return;
-    const chatId = this.parseChatId(channelId);
-    this.feishuClient.sendText(chatId, `📋 Session: ${sessionId}`).catch(() => {});
-  }
-
-  onSystemText(text: string): void {
-    if (!this.lastActiveChannelId) return;
-    const chatId = this.parseChatId(this.lastActiveChannelId);
-    this.feishuClient.sendText(chatId, text).catch((e) => this.log("error", `sendText failed: ${e}`));
+  /** Send error card and remove reaction. */
+  protected async onAfterTurnError(chatId: string, error: string): Promise<void> {
+    const card = buildMarkdownCard(`❌ **Error**: ${error}`);
+    this.feishuClient.sendInteractive(chatId, card).catch(() => {});
+    await this.removeReaction(chatId);
   }
 
   // ---- Internals ----
 
-  private async removeReaction(channelId: string): Promise<void> {
-    const state = this.feishuStates.get(channelId);
-    this.feishuStates.delete(channelId); // delete before await to avoid race with next onPromptSent
+  private async removeReaction(chatId: string): Promise<void> {
+    const state = this.reactionStates.get(chatId);
+    this.reactionStates.delete(chatId);
     if (state?.userMessageId && state.reactionId) {
       await this.feishuClient
         .removeReaction(state.userMessageId, state.reactionId)
         .catch((e) => this.log("error", `removeReaction failed: ${e}`));
     }
-  }
-
-  /** Extract chat_id from channel_id (e.g. "feishu:oc_abc" → "oc_abc"). */
-  private parseChatId(channelId: string): string {
-    const idx = channelId.indexOf(":");
-    return idx >= 0 ? channelId.slice(idx + 1) : channelId;
   }
 }
