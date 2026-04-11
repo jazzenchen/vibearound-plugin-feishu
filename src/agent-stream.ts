@@ -43,6 +43,7 @@ export class AgentStreamHandler extends BlockRenderer<string> {
 
   constructor(client: FeishuClient, log: LogFn, verbose?: Partial<VerboseConfig>) {
     super({
+      streaming: true,
       flushIntervalMs: 500,
       minEditIntervalMs: 600,
       verbose,
