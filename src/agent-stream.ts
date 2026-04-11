@@ -158,10 +158,9 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     this.feishuClient.sendText(chatId, `📋 Session: ${sessionId}`).catch(() => {});
   }
 
-  onSystemText(text: string, channelId?: string): void {
-    const target = channelId ?? this.lastActiveChannelId;
-    if (!target) return;
-    const chatId = this.parseChatId(target);
+  onSystemText(text: string): void {
+    if (!this.lastActiveChannelId) return;
+    const chatId = this.parseChatId(this.lastActiveChannelId);
     this.feishuClient.sendText(chatId, text).catch((e) => this.log("error", `sendText failed: ${e}`));
   }
 
