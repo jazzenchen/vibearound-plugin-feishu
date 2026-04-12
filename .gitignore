@@ -21,3 +21,4 @@ src/tools/docs/
 
 .env
 .env.local
+bun.lock
