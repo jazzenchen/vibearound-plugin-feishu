@@ -69,7 +69,7 @@ function resolveDomain(brand?: string): Lark.Domain {
   return BRAND_DOMAIN[brand ?? "feishu"] ?? Lark.Domain.Feishu;
 }
 
-import { buildMarkdownCard, serializeCard } from "./card/builder.js";
+import { buildMarkdownCard } from "./card/builder.js";
 
 // ---------------------------------------------------------------------------
 // FeishuClient
