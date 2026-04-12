@@ -8,14 +8,13 @@
 
 import path from "node:path";
 
-import type { Agent, ContentBlock } from "@vibearound/plugin-channel-sdk";
+import type { Agent, ContentBlock, ChannelBot } from "@vibearound/plugin-channel-sdk";
 import type { FeishuClient } from "./lark-client.js";
 import type { AgentStreamHandler } from "./agent-stream.js";
 import type { FeishuMessageEvent, FeishuReactionCreatedEvent, MentionInfo } from "./messaging/types.js";
 import type { ConvertContext } from "./messaging/converters/types.js";
 import { convertMessageContent } from "./messaging/converters/content-converter.js";
 import { MessageDedup } from "./messaging/inbound/dedup.js";
-import { mentionedBot } from "./messaging/inbound/mention.js";
 import { downloadMessageResource } from "./messaging/media-download.js";
 import type { DownloadedResource } from "./messaging/media-download.js";
 
@@ -23,8 +22,8 @@ import type { DownloadedResource } from "./messaging/media-download.js";
 // Gateway
 // ---------------------------------------------------------------------------
 
-export class FeishuGateway {
-  /** Public for `createStreamHandler` — the stream handler needs the client to send messages. */
+export class FeishuGateway implements ChannelBot<AgentStreamHandler> {
+  /** Public so `createRenderer` can pass the client to the stream handler. */
   readonly client: FeishuClient;
   private agent: Agent;
   private cacheDir: string;
@@ -77,18 +76,19 @@ export class FeishuGateway {
   private async handleMessage(data: unknown): Promise<void> {
     const event = data as FeishuMessageEvent;
     const msg = event.message;
-    if (!msg) return;
+    if (!msg) { this.log("debug", "handleMessage: no message in event"); return; }
 
     const messageId = msg.message_id ?? "";
     const chatId = msg.chat_id ?? "";
+    this.log("info", `handleMessage: msgId=${messageId} chat=${chatId} type=${msg.message_type}`);
 
     // Dedup
-    if (!this.dedup.check(messageId)) return;
+    if (!this.dedup.check(messageId)) { this.log("debug", `handleMessage: dedup skip ${messageId}`); return; }
 
     // Discard stale messages (>5 min, from WebSocket reconnect replay)
     if (msg.create_time) {
       const createMs = parseInt(msg.create_time, 10);
-      if (!isNaN(createMs) && Date.now() - createMs > 5 * 60 * 1000) return;
+      if (!isNaN(createMs) && Date.now() - createMs > 5 * 60 * 1000) { this.log("debug", `handleMessage: stale skip ${messageId}`); return; }
     }
 
     // Ignore bot's own messages
@@ -98,7 +98,6 @@ export class FeishuGateway {
     // Build converter context with mentions
     const mentionsMap = new Map<string, MentionInfo>();
     const mentionsByOpenId = new Map<string, MentionInfo>();
-    const mentionsList: MentionInfo[] = [];
 
     if (msg.mentions) {
       for (const m of msg.mentions) {
@@ -111,7 +110,6 @@ export class FeishuGateway {
         };
         mentionsMap.set(m.key, info);
         if (openId) mentionsByOpenId.set(openId, info);
-        mentionsList.push(info);
       }
     }
 
@@ -157,15 +155,11 @@ export class FeishuGateway {
       });
     }
 
-    if (contentBlocks.length === 0) return;
+    if (contentBlocks.length === 0) { this.log("debug", "handleMessage: no content blocks"); return; }
 
-    // Notify stream handler that a prompt is being sent (for lifecycle tracking).
-    // Uses raw chatId — no "feishu:" prefix. The host owns channelKind routing.
+    this.log("info", `prompt: chat=${chatId} blocks=${contentBlocks.length} text=${(contentBlocks[0] as any)?.text?.slice(0, 60)}`);
     await this.streamHandler?.onPromptSent(chatId, messageId);
 
-    // Send as ACP prompt — chatId as sessionId.
-    // prompt() blocks until the turn completes and returns the real StopReason.
-    // Session notifications stream in during the call.
     try {
       const response = await this.agent.prompt({
         sessionId: chatId,
@@ -204,7 +198,7 @@ export class FeishuGateway {
 
     const chatId = event.open_chat_id ?? "";
     this.agent
-      .extNotification?.("channel/callback", {
+      .extNotification?.("_va/callback", {
         chatId,
         callbackId: `card_${Date.now()}`,
         sender: { id: event.operator?.open_id ?? "" },

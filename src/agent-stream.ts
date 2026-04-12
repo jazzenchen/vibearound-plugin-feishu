@@ -13,6 +13,7 @@
 import {
   BlockRenderer,
   type BlockKind,
+  type CommandEntry,
   type VerboseConfig,
 } from "@vibearound/plugin-channel-sdk";
 import type { FeishuClient } from "./lark-client.js";
@@ -126,6 +127,83 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     const card = buildMarkdownCard(`❌ **Error**: ${error}`);
     this.feishuClient.sendInteractive(chatId, card).catch(() => {});
     await this.removeReaction(chatId);
+  }
+
+  // ---- Command menu card ----
+
+  /** Render /help as a Feishu interactive card with command buttons. */
+  onCommandMenu(
+    chatId: string,
+    systemCommands: CommandEntry[],
+    agentCommands: CommandEntry[],
+  ): void {
+    const elements: Record<string, unknown>[] = [];
+
+    // Header
+    elements.push({
+      tag: "markdown",
+      content: "**VibeAround Commands**",
+    });
+
+    elements.push({ tag: "hr" });
+
+    // System commands section
+    elements.push({
+      tag: "markdown",
+      content: "**System Commands**",
+    });
+
+    const sysActions: Record<string, unknown>[] = systemCommands
+      .filter((cmd) => cmd.name !== "help")
+      .map((cmd) => ({
+        tag: "button",
+        text: { tag: "plain_text", content: `/${cmd.name}` },
+        type: "default",
+        value: { command: `/${cmd.name}` },
+      }));
+
+    if (sysActions.length > 0) {
+      elements.push({
+        tag: "action",
+        actions: sysActions,
+      });
+    }
+
+    // Agent commands section
+    if (agentCommands.length > 0) {
+      elements.push({ tag: "hr" });
+      elements.push({
+        tag: "markdown",
+        content: "**Agent Commands** (use /agent <command>)",
+      });
+
+      const agentActions: Record<string, unknown>[] = agentCommands.map((cmd) => ({
+        tag: "button",
+        text: { tag: "plain_text", content: `/${cmd.name}` },
+        type: "default",
+        value: { command: `/agent ${cmd.name}` },
+      }));
+
+      elements.push({
+        tag: "action",
+        actions: agentActions,
+      });
+    } else {
+      elements.push({
+        tag: "markdown",
+        content: "_Agent commands will appear after sending your first message._",
+      });
+    }
+
+    // Use V1 card schema — V2 does not support the "action" tag.
+    const card = {
+      config: { wide_screen_mode: true },
+      elements,
+    };
+
+    this.feishuClient.sendInteractive(chatId, card).catch((e) => {
+      this.log("error", `sendCommandMenu failed: ${e}`);
+    });
   }
 
   // ---- Internals ----
