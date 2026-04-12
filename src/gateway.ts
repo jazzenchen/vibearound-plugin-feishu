@@ -76,19 +76,17 @@ export class FeishuGateway implements ChannelBot<AgentStreamHandler> {
   private async handleMessage(data: unknown): Promise<void> {
     const event = data as FeishuMessageEvent;
     const msg = event.message;
-    if (!msg) { this.log("debug", "handleMessage: no message in event"); return; }
+    if (!msg) return;
 
     const messageId = msg.message_id ?? "";
     const chatId = msg.chat_id ?? "";
-    this.log("info", `handleMessage: msgId=${messageId} chat=${chatId} type=${msg.message_type}`);
 
-    // Dedup
-    if (!this.dedup.check(messageId)) { this.log("debug", `handleMessage: dedup skip ${messageId}`); return; }
+    if (!this.dedup.check(messageId)) return;
 
     // Discard stale messages (>5 min, from WebSocket reconnect replay)
     if (msg.create_time) {
       const createMs = parseInt(msg.create_time, 10);
-      if (!isNaN(createMs) && Date.now() - createMs > 5 * 60 * 1000) { this.log("debug", `handleMessage: stale skip ${messageId}`); return; }
+      if (!isNaN(createMs) && Date.now() - createMs > 5 * 60 * 1000) return;
     }
 
     // Ignore bot's own messages
@@ -155,9 +153,10 @@ export class FeishuGateway implements ChannelBot<AgentStreamHandler> {
       });
     }
 
-    if (contentBlocks.length === 0) { this.log("debug", "handleMessage: no content blocks"); return; }
+    if (contentBlocks.length === 0) return;
 
-    this.log("info", `prompt: chat=${chatId} blocks=${contentBlocks.length} text=${(contentBlocks[0] as any)?.text?.slice(0, 60)}`);
+    const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
+    this.log("info", `prompt: chat=${chatId} blocks=${contentBlocks.length} text=${firstText.slice(0, 60)}`);
     await this.streamHandler?.onPromptSent(chatId, messageId);
 
     try {
@@ -184,28 +183,53 @@ export class FeishuGateway implements ChannelBot<AgentStreamHandler> {
     if (!this.dedup.check(dedupKey)) return;
     if (senderOpenId === this.client.botOpenId) return;
 
-    // Reaction events are logged but not forwarded to host (no handler).
-    this.log("debug", `reaction: msg=${messageId} emoji=${emoji} sender=${senderOpenId}`);
+    // Reaction events are not forwarded to host.
   }
 
   private async handleCardAction(data: unknown): Promise<unknown> {
     const event = data as {
-      action?: { value?: Record<string, unknown> };
+      action?: { value?: Record<string, unknown>; tag?: string };
+      operator?: { open_id?: string };
+      // V2 puts chat/message IDs in context, V1 had them at top level
+      context?: { open_chat_id?: string; open_message_id?: string };
       open_chat_id?: string;
       open_message_id?: string;
-      operator?: { open_id?: string };
     };
 
-    const chatId = event.open_chat_id ?? "";
-    this.agent
-      .extNotification?.("_va/callback", {
-        chatId,
-        callbackId: `card_${Date.now()}`,
-        sender: { id: event.operator?.open_id ?? "" },
-        data: event.action?.value ?? {},
-        messageId: event.open_message_id,
-      })
-      .catch(() => {});
+    const chatId = event.context?.open_chat_id ?? event.open_chat_id ?? "";
+    const messageId = event.context?.open_message_id ?? event.open_message_id;
+    const command = event.action?.value?.command as string | undefined;
+
+    this.log("info", `card action: chat=${chatId} command=${command ?? "none"}`);
+
+    if (command && chatId) {
+      // Command button clicked — send as a prompt so the host can parse the slash command
+      const contentBlocks: ContentBlock[] = [{ type: "text", text: command }];
+      await this.streamHandler?.onPromptSent(chatId);
+      try {
+        const response = await this.agent.prompt({
+          sessionId: chatId,
+          prompt: contentBlocks,
+        });
+        this.log("info", `card command done chat=${chatId} cmd=${command} stopReason=${response.stopReason}`);
+        this.streamHandler?.onTurnEnd(chatId);
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : String(error);
+        this.log("error", `card command failed chat=${chatId}: ${msg}`);
+        this.streamHandler?.onTurnError(chatId, msg);
+      }
+    } else {
+      // Generic callback (non-command button)
+      this.agent
+        .extNotification?.("_va/callback", {
+          chatId,
+          callbackId: `card_${Date.now()}`,
+          sender: { id: event.operator?.open_id ?? "" },
+          data: event.action?.value ?? {},
+          messageId,
+        })
+        .catch(() => {});
+    }
     return {};
   }
 }

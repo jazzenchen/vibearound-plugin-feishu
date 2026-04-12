@@ -63,7 +63,7 @@ export class AgentStreamHandler extends BlockRenderer<string> {
   /** Send new streaming block as an interactive card. */
   protected async sendBlock(chatId: string, kind: BlockKind, content: string): Promise<string | null> {
     try {
-      const card = buildStreamingCard(content, "streaming");
+      const card = buildStreamingCard(content);
       const messageId = await this.feishuClient.sendInteractive(chatId, card);
       this.log("debug", `sendBlock kind=${kind} messageId=${messageId}`);
       return messageId ?? null;
@@ -75,14 +75,14 @@ export class AgentStreamHandler extends BlockRenderer<string> {
 
   /** Edit existing block — streaming card while live, markdown card when sealed. */
   protected async editBlock(
-    chatId: string,
+    _chatId: string,
     ref: string,
     _kind: BlockKind,
     content: string,
     sealed: boolean,
   ): Promise<void> {
     try {
-      const card = sealed ? buildMarkdownCard(content) : buildStreamingCard(content, "streaming");
+      const card = sealed ? buildMarkdownCard(content) : buildStreamingCard(content);
       await this.feishuClient.updateInteractive(ref, card);
     } catch (e) {
       this.log("error", `editBlock failed: ${e}`);
@@ -131,7 +131,7 @@ export class AgentStreamHandler extends BlockRenderer<string> {
 
   // ---- Command menu card ----
 
-  /** Render /help as a Feishu interactive card with command buttons. */
+  /** Render command menu as a Feishu V2 card. */
   onCommandMenu(
     chatId: string,
     systemCommands: CommandEntry[],
@@ -139,66 +139,55 @@ export class AgentStreamHandler extends BlockRenderer<string> {
   ): void {
     const elements: Record<string, unknown>[] = [];
 
-    // Header
-    elements.push({
-      tag: "markdown",
-      content: "**VibeAround Commands**",
-    });
+    if (systemCommands.length > 0) {
+      elements.push({ tag: "markdown", content: "**System Commands**" });
 
-    elements.push({ tag: "hr" });
+      // Clickable commands (no args) — primary buttons
+      const clickable = systemCommands.filter((cmd) => !cmd.args && cmd.name !== "help");
+      for (const cmd of clickable) {
+        elements.push({
+          tag: "button",
+          text: { tag: "plain_text", content: `/${cmd.name}  —  ${cmd.description}` },
+          type: "primary",
+          size: "medium",
+          behaviors: [{ type: "callback", value: { command: `/${cmd.name}` } }],
+        });
+      }
 
-    // System commands section
-    elements.push({
-      tag: "markdown",
-      content: "**System Commands**",
-    });
-
-    const sysActions: Record<string, unknown>[] = systemCommands
-      .filter((cmd) => cmd.name !== "help")
-      .map((cmd) => ({
-        tag: "button",
-        text: { tag: "plain_text", content: `/${cmd.name}` },
-        type: "default",
-        value: { command: `/${cmd.name}` },
-      }));
-
-    if (sysActions.length > 0) {
-      elements.push({
-        tag: "action",
-        actions: sysActions,
-      });
+      // Non-clickable commands (with args) — label style
+      const withArgs = systemCommands.filter((cmd) => !!cmd.args && cmd.name !== "help");
+      if (withArgs.length > 0) {
+        elements.push({ tag: "hr" });
+        const lines = withArgs.map((cmd) => {
+          const usage = `/${cmd.name} ${cmd.args}`;
+          return `\`${usage}\`  <font color="grey">${cmd.description}</font>`;
+        });
+        elements.push({ tag: "markdown", content: lines.join("\n") });
+      }
     }
 
-    // Agent commands section
     if (agentCommands.length > 0) {
-      elements.push({ tag: "hr" });
+      elements.push({ tag: "markdown", content: "**Agent Commands**" });
+      // Agent commands as markdown list (too many for buttons)
+      const lines = agentCommands.map((cmd) => {
+        const desc = cmd.description
+          ? `  <font color="grey">${cmd.description.length > 60 ? cmd.description.slice(0, 57) + "..." : cmd.description}</font>`
+          : "";
+        return `\`/agent ${cmd.name}\`${desc}`;
+      });
+      elements.push({ tag: "markdown", content: lines.join("\n") });
+    } else if (systemCommands.length === 0) {
+      // /agent with no session yet
       elements.push({
         tag: "markdown",
-        content: "**Agent Commands** (use /agent <command>)",
-      });
-
-      const agentActions: Record<string, unknown>[] = agentCommands.map((cmd) => ({
-        tag: "button",
-        text: { tag: "plain_text", content: `/${cmd.name}` },
-        type: "default",
-        value: { command: `/agent ${cmd.name}` },
-      }));
-
-      elements.push({
-        tag: "action",
-        actions: agentActions,
-      });
-    } else {
-      elements.push({
-        tag: "markdown",
-        content: "_Agent commands will appear after sending your first message._",
+        content: "<font color=\"grey\">Agent commands will appear after sending your first message.</font>",
       });
     }
 
-    // Use V1 card schema — V2 does not support the "action" tag.
     const card = {
+      schema: "2.0",
       config: { wide_screen_mode: true },
-      elements,
+      body: { elements },
     };
 
     this.feishuClient.sendInteractive(chatId, card).catch((e) => {
