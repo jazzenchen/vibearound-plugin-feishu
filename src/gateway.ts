@@ -156,8 +156,16 @@ export class FeishuGateway implements ChannelBot<AgentStreamHandler> {
     if (contentBlocks.length === 0) return;
 
     const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
+
+    // If a permission prompt is awaiting a reply, consume this message instead
+    // of forwarding it to the agent.
+    if (firstText && this.streamHandler?.consumePendingText(chatId, firstText)) {
+      this.log("info", `consumed text as permission reply chat=${chatId}`);
+      return;
+    }
+
     this.log("info", `prompt: chat=${chatId} blocks=${contentBlocks.length} text=${firstText.slice(0, 60)}`);
-    await this.streamHandler?.onPromptSent(chatId, messageId);
+    this.streamHandler?.onPromptSent(chatId);
 
     try {
       const response = await this.agent.prompt({
@@ -199,8 +207,44 @@ export class FeishuGateway implements ChannelBot<AgentStreamHandler> {
     const chatId = event.context?.open_chat_id ?? event.open_chat_id ?? "";
     const messageId = event.context?.open_message_id ?? event.open_message_id;
     const command = event.action?.value?.command as string | undefined;
+    const callbackKind = event.action?.value?.kind as string | undefined;
 
-    this.log("info", `card action: chat=${chatId} command=${command ?? "none"}`);
+    this.log("info", `card action: chat=${chatId} kind=${callbackKind ?? "none"} command=${command ?? "none"}`);
+
+    // Permission button click — route back to the renderer's pending promise,
+    // and return a finalized card (no buttons) directly in the HTTP callback
+    // response so Feishu atomically replaces the original card. This avoids
+    // a separate update-API roundtrip and the race window where the user
+    // could click the same button multiple times.
+    //
+    // Response shape per Feishu V2 card callback docs:
+    //   { toast?: {...}, card?: { type: "raw", data: <cardJson> } }
+    if (callbackKind === "permission" && this.streamHandler) {
+      const callbackId = event.action?.value?.callbackId as string | undefined;
+      const optionId = event.action?.value?.optionId as string | undefined;
+      const optionName =
+        (event.action?.value?.optionName as string | undefined) ?? optionId ?? "";
+      if (callbackId && optionId) {
+        const resolved = this.streamHandler.resolvePermission(callbackId, optionId);
+        this.log(
+          "info",
+          `permission resolve cb=${callbackId} option=${optionId} ok=${resolved}`,
+        );
+        if (resolved) {
+          return {
+            toast: { type: "info", content: `Selected: ${optionName}` },
+            card: {
+              type: "raw",
+              data: this.streamHandler.buildFinalizedPermissionCard(optionName),
+            },
+          };
+        }
+      }
+      // Stale click — inform user but leave the card alone.
+      return {
+        toast: { type: "warning", content: "This request was already handled." },
+      };
+    }
 
     if (command && chatId) {
       // Command button clicked — send as a prompt so the host can parse the slash command

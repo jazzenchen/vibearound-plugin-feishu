@@ -4,7 +4,7 @@
  * Thin layer over @larksuiteoapi/node-sdk that provides:
  *   - SDK client + WebSocket lifecycle
  *   - Bot identity probe
- *   - Send / edit / reply / reaction APIs
+ *   - Send / edit / reply APIs
  *   - Interactive card send / update
  *
  * All methods use the Feishu REST API via the SDK client.
@@ -257,22 +257,6 @@ export class FeishuClient {
       data: {
         content: JSON.stringify(card),
       },
-    });
-  }
-
-  // ---- Reactions -----------------------------------------------------------
-
-  async addReaction(messageId: string, emoji: string): Promise<string | undefined> {
-    const res = await this.sdk.im.messageReaction.create({
-      path: { message_id: messageId },
-      data: { reaction_type: { emoji_type: emoji } },
-    });
-    return res.data?.reaction_id;
-  }
-
-  async removeReaction(messageId: string, reactionId: string): Promise<void> {
-    await this.sdk.im.messageReaction.delete({
-      path: { message_id: messageId, reaction_id: reactionId },
     });
   }
 
