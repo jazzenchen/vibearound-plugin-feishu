@@ -1,19 +1,23 @@
 /**
  * Feishu stream renderer — extends BlockRenderer with Feishu-specific transport.
  *
- * Only implements:
+ * Implements:
  *   - sendText / sendBlock / editBlock — Feishu API calls
  *   - formatContent — Feishu markdown formatting
- *   - onAfterTurnEnd / onAfterTurnError — "OnIt" reaction management
+ *   - onAfterTurnError — error card
+ *   - onCommandMenu — V2 card for command listing
+ *   - onRequestPermission — V2 card with interactive permission buttons
  *
  * Everything else (block accumulation, debouncing, notification routing,
- * lastActiveChatId tracking) is handled by BlockRenderer in the SDK.
+ * toolCallId caching, text-permission fallback, lastActiveChatId tracking)
+ * is handled by BlockRenderer in the SDK.
  */
 
 import {
   BlockRenderer,
   type BlockKind,
   type CommandEntry,
+  type RequestPermissionRequest,
   type VerboseConfig,
 } from "@vibearound/plugin-channel-sdk";
 import type { FeishuClient } from "./lark-client.js";
@@ -25,14 +29,6 @@ import { buildStreamingCard, buildMarkdownCard } from "./card/builder.js";
 
 type LogFn = (level: string, msg: string) => void;
 
-/** Per-chat state for "OnIt" reaction tracking. */
-interface ReactionState {
-  userMessageId: string | null;
-  reactionId: string | null;
-}
-
-const PROCESSING_EMOJI = "OnIt";
-
 // ---------------------------------------------------------------------------
 // FeishuStreamHandler
 // ---------------------------------------------------------------------------
@@ -40,7 +36,6 @@ const PROCESSING_EMOJI = "OnIt";
 export class AgentStreamHandler extends BlockRenderer<string> {
   private feishuClient: FeishuClient;
   private log: LogFn;
-  private reactionStates = new Map<string, ReactionState>();
 
   constructor(client: FeishuClient, log: LogFn, verbose?: Partial<VerboseConfig>) {
     super({
@@ -98,35 +93,109 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     }
   }
 
-  // ---- Feishu-specific: "OnIt" reaction ----
+  // ---- Error rendering ----
 
-  /** Add "OnIt" reaction when prompt starts. */
-  async onPromptSent(chatId: string, userMessageId?: string): Promise<void> {
-    super.onPromptSent(chatId);
+  /** Send error card on turn error. */
+  protected async onAfterTurnError(chatId: string, error: string): Promise<void> {
+    const card = buildMarkdownCard(`❌ **Error**\n\n${error}`);
+    this.feishuClient.sendInteractive(chatId, card).catch(() => {});
+  }
 
-    const state: ReactionState = { userMessageId: userMessageId ?? null, reactionId: null };
-    this.reactionStates.set(chatId, state);
+  // ---- Permission UI (Tier 1: interactive card buttons) ----
 
-    if (userMessageId) {
-      try {
-        const rid = await this.feishuClient.addReaction(userMessageId, PROCESSING_EMOJI);
-        if (rid) state.reactionId = rid;
-      } catch (e) {
-        this.log("error", `addReaction failed: ${e}`);
-      }
+  /**
+   * Render a permission request as a V2 card with all options on a single
+   * horizontal row of buttons (via `column_set`). The button `value` encodes
+   * `{ kind: "permission", callbackId, optionId, optionName }` so the gateway's
+   * card action handler can route the click back to `resolvePermission` and
+   * update the card into a resolved state.
+   *
+   * We capture the sent messageId in `permissionCardMessages` keyed by
+   * callbackId so the gateway can edit the card after the first click.
+   */
+  protected async onRequestPermission(
+    chatId: string,
+    request: RequestPermissionRequest,
+    callbackId: string,
+  ): Promise<void> {
+    const options = request.options ?? [];
+    const toolTitle =
+      (request.toolCall as { title?: string } | undefined)?.title ?? "the agent";
+
+    const buttonColumns = options.map((opt) => ({
+      tag: "column",
+      width: "weighted",
+      weight: 1,
+      vertical_align: "center",
+      elements: [
+        {
+          tag: "button",
+          text: { tag: "plain_text", content: opt.name },
+          type: buttonTypeForKind(opt.kind),
+          size: "medium",
+          width: "fill",
+          behaviors: [
+            {
+              type: "callback",
+              value: {
+                kind: "permission",
+                callbackId,
+                optionId: opt.optionId,
+                optionName: opt.name,
+              },
+            },
+          ],
+        },
+      ],
+    }));
+
+    const card = {
+      schema: "2.0",
+      config: { wide_screen_mode: true },
+      body: {
+        elements: [
+          {
+            tag: "markdown",
+            content: `🔐 **Permission required**\n\n\`${toolTitle}\``,
+          },
+          {
+            tag: "column_set",
+            flex_mode: "stretch",
+            horizontal_spacing: "8px",
+            columns: buttonColumns,
+          },
+        ],
+      },
+    };
+
+    try {
+      await this.feishuClient.sendInteractive(chatId, card);
+    } catch (e) {
+      this.log("error", `onRequestPermission send failed: ${e}`);
+      throw e;
     }
   }
 
-  /** Remove reaction after turn completes. */
-  protected async onAfterTurnEnd(chatId: string): Promise<void> {
-    await this.removeReaction(chatId);
-  }
-
-  /** Send error card and remove reaction. */
-  protected async onAfterTurnError(chatId: string, error: string): Promise<void> {
-    const card = buildMarkdownCard(`❌ **Error**: ${error}`);
-    this.feishuClient.sendInteractive(chatId, card).catch(() => {});
-    await this.removeReaction(chatId);
+  /**
+   * Build the "finalized" card shown after a permission button has been
+   * clicked. Used as the HTTP response body of the Feishu card-action
+   * callback, which atomically replaces the original card with this one —
+   * no separate update-API roundtrip, no timing window where the user can
+   * click the button twice.
+   */
+  buildFinalizedPermissionCard(optionName: string): Record<string, unknown> {
+    return {
+      schema: "2.0",
+      config: { wide_screen_mode: true },
+      body: {
+        elements: [
+          {
+            tag: "markdown",
+            content: `🔐 Permission — selected: **${optionName}**`,
+          },
+        ],
+      },
+    };
   }
 
   // ---- Command menu card ----
@@ -194,16 +263,22 @@ export class AgentStreamHandler extends BlockRenderer<string> {
       this.log("error", `sendCommandMenu failed: ${e}`);
     });
   }
+}
 
-  // ---- Internals ----
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-  private async removeReaction(chatId: string): Promise<void> {
-    const state = this.reactionStates.get(chatId);
-    this.reactionStates.delete(chatId);
-    if (state?.userMessageId && state.reactionId) {
-      await this.feishuClient
-        .removeReaction(state.userMessageId, state.reactionId)
-        .catch((e) => this.log("error", `removeReaction failed: ${e}`));
-    }
+/** Map permission option kinds to Feishu V2 button styles. */
+function buttonTypeForKind(kind: string): string {
+  switch (kind) {
+    case "allow_once":
+    case "allow_always":
+      return "primary";
+    case "reject_once":
+    case "reject_always":
+      return "danger";
+    default:
+      return "default";
   }
 }
