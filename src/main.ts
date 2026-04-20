@@ -38,4 +38,15 @@ runChannelPlugin({
   },
   createRenderer: (gateway, log, verbose) =>
     new AgentStreamHandler(gateway.client, log, verbose),
+  // Heartbeat health check — probe() re-fetches bot identity via Feishu REST,
+  // exercising the tenant access token refresh path. If this fails, our
+  // token is dead or the platform is unreachable.
+  healthCheck: async (gateway) => {
+    try {
+      const r = await gateway.client.probe();
+      return r.ok === true;
+    } catch {
+      return false;
+    }
+  },
 });
