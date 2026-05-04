@@ -1,5 +1,5 @@
 {
-  "name": "@vibearound/plugin-feishu",
+  "name": "@vibearound/plugin-channel-feishu",
   "version": "0.5.0",
   "private": true,
   "type": "module",
